@@ -11,7 +11,7 @@
 		"SQL",
 		"Tedious"
 	],
-	"author": "Darien Brown <unidyne@gmail.com>",
+	"author": "D. Oliver Brown <unidyne AT gmail.com>",
 	"license": "MIT",
 	"bugs": {
 		"url": "https://github.com/unidyne/node-sqlserver/issues"
