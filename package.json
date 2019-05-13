@@ -1,0 +1,23 @@
+{
+	"name": "node-sqlserver",
+	"version": "0.1.2",
+	"description": "A wrapper for Tedious.",
+	"main": "main.js",
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/unidyne/node-sqlserver.git"
+	},
+	"keywords": [
+		"SQL",
+		"Tedious"
+	],
+	"author": "Darien Brown <unidyne@gmail.com>",
+	"license": "MIT",
+	"bugs": {
+		"url": "https://github.com/unidyne/node-sqlserver/issues"
+	},
+	"homepage": "https://github.com/unidyne/node-sqlserver#readme",
+	"dependencies": {
+		"tedious": "^6.1.1"
+	}
+}
