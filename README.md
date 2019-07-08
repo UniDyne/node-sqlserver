@@ -1,6 +1,8 @@
 # node-sqlserver
 
-A simple wrapper for the [Tedious](https://www.npmjs.com/package/tedious) driver. This wrapper can turn parameterized queries into function calls that support either the standard callback-style of Tedious or return Promises. The idea is to create an object that encapsulates a list of queries such that you get behaviour similar to a data access object and the particulars of the query are abstracted away.
+A wrapper for the [Tedious](https://www.npmjs.com/package/tedious) driver. This wrapper can turn parameterized queries into function calls that support either the standard callback-style of Tedious or return Promises. The idea is to create an object that encapsulates a list of queries such that you get behaviour similar to a data access object and the particulars of the query are abstracted away.
+
+Additionally, the wrapper implements SQL connection pooling. In apps that have multiple users or are otherwise highly asynchronous, pooling will prevent bottlenecks when dealing with multiple queries.
 
 ## Installation
 This module is not currently registered with NPM. In order to install, you must use the following command:
@@ -10,11 +12,15 @@ This module is not currently registered with NPM. In order to install, you must 
 ## Usage Example
 
 ```js
+const fs = require('fs'),
+	{SQLServerPool} = require('node-sql-server');
+
 // load tedious config from a JSON file
 const sqlConfig = JSON.parse(fs.readFileSync('./etc/sqlserver.conf'));
 
 // connect to SQL Server using this module
-const sqlServer = new require('node-sqlserver')(sqlConfig);
+
+sqlServer = new SQLServerPool(sqlConfig);
 
 // load queries (could use a JSON file)
 const sqlQueries = sqlServer.loadQueries([
@@ -47,12 +53,6 @@ sqlQueries.getAllCategories({}, async (err, rowCount, rows) => {
 	}
 });
 ```
-
-# Events
-A SQL instance will emit the following events:
-* `connectFail` : When the connection dies and cannot be re-established.
-* `connected` : When the connection is established or re-established.
-* `connectClose` : When connection closes, whether intended or not.
 
 ## To Do
 
