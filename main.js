@@ -1,8 +1,6 @@
 'use strict';
 
-const events = require('events'),
-	util = require('util'),
-	{Connection, Request, TYPES} = require('tedious');
+const {Connection, Request, TYPES} = require('tedious');
 
 
 // used to match type strings in parameter definitions
@@ -14,92 +12,138 @@ for(var k in TYPES) {
 }
 
 
-function _impl(args) {
-	const self = this;
+const
+	NEW = 0,
+	IDLE = 1,
+	BUSY = 2,
+	
+	MAX_POOL = 16;
+	
+	
+function SQLServerPool(config) {
 	
 	// load connection / tedious config
 	// will decode username, password, server ip from base64 obfuscation
 	// note, none of these settings are encrypted
-	const sqlcfg = objectAssign({}, args);
+	const sqlcfg = objectAssign({
+		server: '127.0.0.1',
+		authentication: {
+			options: {
+				userName: '',
+				password: ''
+			}
+		}
+	}, config);
 	if(sqlcfg.authentication.options.userName.startsWith('data:')) sqlcfg.authentication.options.userName = atob(sqlcfg.authentication.options.userName.replace('data:',''));
 	if(sqlcfg.authentication.options.password.startsWith('data:')) sqlcfg.authentication.options.password = atob(sqlcfg.authentication.options.password.replace('data:',''));
 	if(sqlcfg.server.startsWith('data:')) sqlcfg.server = atob(sqlcfg.server.replace('data:',''));
 	
-	// PRIVATE VARS
-	var connection;
-	var closing = false, attemptCount = 0;
 	
 	
-	function handleConnection(err) {
-		if(err) {
-			if(attemptCount < 10) setTimeout(getConnection, (++attemptCount) * 5000);
-			
-			console.log('Connection error.');
-			self.emit('connectFail', attemptCount < 10);
-			return;
-		}
+	const pool = [], requestQueue = [], self = this;
+	var running = true, queueProc;
+	
+	
+	// create connection
+	function createConnection(config) {
+		if(!running) return null;
 		
-		attemptCount = 0;
-		self.emit('connected');
+		var connection = new Connection(sqlcfg);
+		
+	//	connection.on('connect', handleConnection);
+	//	connection.on('end', handleConnectionClose);
+		connection.on('error', logError);
+	//	connection.on('debug', logDebug);
+	//	connection.on('infoMessage', logServerMessage);
+	//	connection.on('errorMessage', logServerMessage);
+		
+		return connection;
+	}
+
+	function acquireConnection() {
+		return new Promise((resolve) => {
+			if(!running) resolve(null);
+			
+			// find and return idle connection
+			for(var i = 0; i < pool.length; i++) {
+				if(pool[i].status == IDLE) {
+					return resolve(pool[i]);
+				}
+			}
+			
+			// or attempt to create a new connection
+			if(pool.length < MAX_POOL) {
+				var con = createConnection(sqlcfg);
+				if(con == null) resolve(null);
+				
+				var entry = {
+					con: con,
+					status: NEW
+				};
+				
+				// when connection made, return to caller
+				con.on('connect', (err) => {
+					if(err) return handleError(err);
+					entry.status = IDLE;
+					return resolve(entry);
+				});
+				
+				// if connection ends, remove from pool
+				con.on('end', () => {
+					for(var i = 0; i < pool.length; i++) {
+						if(pool[i] === entry)
+							return pool.splice(i,1);
+					}
+				});
+				
+				pool.push(entry);
+			} else return resolve(null);
+			// no connections available, return null
+		});
 	}
 	
-	function handleConnectionClose() {
-		self.emit('connectClose');
+	
+	async function queueProc() {
+		if(!running) return;
 		
-		// handle connection unexpectedly closed
-		if(!closing) {
-			// start retry loop
-			if(attemptCount == 0) {
-				getConnection();
+		console.log(`Queue Length: ${requestQueue.length}     Pool: ${pool.length}`);
+		if(requestQueue.length > 0) {
+			var pooled = await acquireConnection();
+			if(pooled != null) {
+				var job = requestQueue.shift();
+				job(pooled);
 			}
 		}
-	}
-	
-	
-/*
-	DUMMY LOG FUNCTIONS
-*/
-	function logServerMessage(mesgObj) {
-		console.log(mesgObj);
-	}
-	
-	function logError(err) {
-		console.log(err);
-	}
-	
-	function logDebug(mesg) {
-		console.log(mesg);
-	}
-	
-	
-	
-/*
-	TEDIUOUS - Connect and attach to loggers
-*/
-	
-	function getConnection() {
-		// connect
-		connection = new Connection(sqlcfg);
 		
-		connection.on('connect', handleConnection);
-		connection.on('end', handleConnectionClose);
-		connection.on('error', logError);
-		connection.on('debug', logDebug);
-		connection.on('infoMessage', logServerMessage);
-		connection.on('errorMessage', logServerMessage);
+		if(running) {
+			if(requestQueue.length > 0) setImmediate(queueProc);
+			else setTimeout(queueProc, 500);
+		}
+	}
+	
+	
+	this.start = function() {
+		running = true;
+		return setImmediate(queueProc);
 	};
 	
+	this.stop = function() {
+		running = false;
+	};
 	
-	
-	
-/*
-	PUBLIC API
-*/
 	
 	// convenience method - passes query directly to Tedious
-	this.exec = function(sql, callback) {
-		connection.execSql(new Request(sql, (callback || function() {})));
+	this.exec = async function(sql, callback) {
+		requestQueue.push((pooled) => {
+			pooled.status = BUSY;
+			pooled.con.execSql(new Request(sql, (err, count, rows) => {
+				pooled.status = IDLE;
+				if(callback) return callback(err, count, rows);
+			}));
+		});
 	};
+	
+	
 	
 	// load an array of query definitions
 	// returns an object with function calls for each named query
@@ -126,51 +170,67 @@ function _impl(args) {
 			return function(obj) {
 				obj = obj || {};
 				return new Promise(resolve => {
-					var req = new Request(sql, (err, rowCount, rows) => {
-						if(err) return console.log(err);
-						return resolve(rowCount > 0 ? rows : []);
+					
+					requestQueue.push((pooled) => {
+						pooled.status = BUSY;
+						
+						var req = new Request(sql, (err, rowCount, rows) => {
+							if(err) return console.log(err);
+							pooled.status = IDLE;
+							return resolve(rowCount > 0 ? rows : []);
+						});
+						
+						// cycle through params and set up
+						for(var i = 0; i < params.length; i++) {
+							req.addParameter(params[i].name, TYPEHASH[params[i].type.toLowerCase()], obj[params[i].name], params[i].options);
+						}
+						
+						pooled.con.execSql(req);
 					});
-					
-					// cycle through params and set up
-					for(var i = 0; i < params.length; i++) {
-						var x = req.addParameter(params[i].name, TYPEHASH[params[i].type.toLowerCase()], obj[params[i].name], params[i].options);
-						console.log(x);
-					}
-					
-					connection.execSql(req);
 				});
 			};
 		}
 		
-		
 		return function(obj, optcallback) {
-			obj = obj || {};
-			var req = new Request(sql, optcallback || callback);
-			
-			//console.log(sql);
-			
-			// cycle through params and set up
-			for(var i = 0; i < params.length; i++) {
-				var x = req.addParameter(params[i].name, TYPEHASH[params[i].type.toLowerCase()], obj[params[i].name], params[i].options);
-				console.log(x);
-			}
-			
-			console.log(req);
-			
-			connection.execSql(req);
+			requestQueue.push((pooled) => {
+				obj = obj || {};
+				
+				pooled.status = BUSY;
+				
+				var req = new Request(sql, (err, rowCount, rows) => {
+					pooled.status = IDLE;
+					return (optcallback || callback)(err, rowCount, rows);
+				});
+				
+				//console.log(sql);
+				
+				// cycle through params and set up
+				for(var i = 0; i < params.length; i++) {
+					req.addParameter(params[i].name, TYPEHASH[params[i].type.toLowerCase()], obj[params[i].name], params[i].options);
+				}
+				
+				console.log(`   Request: ${req}`);
+				
+				pooled.con.execSql(req);
+			});
 		};
 		
 	};
 	
 	
-	
-	// establish connection immediately
-	getConnection();
+	return this;
 }
 
-util.inherits(_impl, events);
+function logError(e) {
+	console.log(`SQL Error: ${e}`);
+}
 
-module.exports = _impl;
+
+
+module.exports = {
+	SQLServerPool
+};
+
 
 
 
