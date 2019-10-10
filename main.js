@@ -70,7 +70,7 @@ function SQLServerPool(config) {
 	
 	
 	const pool = [], requestQueue = [], self = this;
-	var running = true, queueProc;
+	var running = true, queueProc, queueTimer = 100;
 	
 	
 	// create connection
