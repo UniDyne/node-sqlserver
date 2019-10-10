@@ -17,7 +17,33 @@ const
 	IDLE = 1,
 	BUSY = 2,
 	
+	FAIL = 3,
+	
 	MAX_POOL = 16;
+
+
+
+function handleError(err) {
+	if(global.output) global.output.error(JSON.stringify(err));
+	else console.log(JSON.stringify(err));
+}
+
+
+function setParameters(req, params, obj) {
+	for(var i = 0; i < params.length; i++) {
+		req.addParameter(params[i].name, TYPEHASH[params[i].type.toLowerCase()], obj[params[i].name], params[i].options);
+	}
+}
+
+
+function flattenResults(rows) {
+	var rr = [];
+	for(var i = 0; i < rows.length; i++) {
+		rr.push(Object.entries(rows[i]).reduce((a,v) => {a[v[0]] = v[1].value; return a;}, {}));
+	}
+	return rr;
+}
+
 	
 	
 function SQLServerPool(config) {
@@ -25,7 +51,7 @@ function SQLServerPool(config) {
 	// load connection / tedious config
 	// will decode username, password, server ip from base64 obfuscation
 	// note, none of these settings are encrypted
-	const sqlcfg = objectAssign({
+	const sqlConfig = Object.assign({
 		server: '127.0.0.1',
 		authentication: {
 			options: {
@@ -34,6 +60,7 @@ function SQLServerPool(config) {
 			}
 		}
 	}, config);
+
 	if(sqlcfg.authentication.options.userName.startsWith('data:')) sqlcfg.authentication.options.userName = atob(sqlcfg.authentication.options.userName.replace('data:',''));
 	if(sqlcfg.authentication.options.password.startsWith('data:')) sqlcfg.authentication.options.password = atob(sqlcfg.authentication.options.password.replace('data:',''));
 	if(sqlcfg.server.startsWith('data:')) sqlcfg.server = atob(sqlcfg.server.replace('data:',''));
@@ -48,16 +75,7 @@ function SQLServerPool(config) {
 	function createConnection(config) {
 		if(!running) return null;
 		
-		var connection = new Connection(sqlcfg);
-		
-	//	connection.on('connect', handleConnection);
-	//	connection.on('end', handleConnectionClose);
-		connection.on('error', logError);
-	//	connection.on('debug', logDebug);
-	//	connection.on('infoMessage', logServerMessage);
-	//	connection.on('errorMessage', logServerMessage);
-		
-		return connection;
+		return new Connection(sqlcfg);
 	}
 
 	function acquireConnection() {
@@ -65,9 +83,15 @@ function SQLServerPool(config) {
 			if(!running) resolve(null);
 			
 			// find and return idle connection
-			for(var i = 0; i < pool.length; i++) {
+			for(var i = pool.length - 1; i >= 0; i--) {
 				if(pool[i].status == IDLE) {
 					return resolve(pool[i]);
+				}
+
+				// remove broken connections
+				if(pool[i].status == FAIL) {
+					var broken = pool.splice(i,1);
+					broken.con.close();
 				}
 			}
 			
@@ -86,6 +110,13 @@ function SQLServerPool(config) {
 					if(err) return handleError(err);
 					entry.status = IDLE;
 					return resolve(entry);
+				});
+
+				con.on('error', (err) => {
+					//console.log('aquireConnection()');
+					handleError(err);
+					entry.status = FAIL;
+					return resolve(null);
 				});
 				
 				// if connection ends, remove from pool
@@ -106,21 +137,108 @@ function SQLServerPool(config) {
 	async function queueProc() {
 		if(!running) return;
 		
-		console.log(`Queue Length: ${requestQueue.length}     Pool: ${pool.length}`);
+		//console.log(`Queue Length: ${requestQueue.length}     Pool: ${pool.length}`);
 		if(requestQueue.length > 0) {
 			var pooled = await acquireConnection();
 			if(pooled != null) {
 				var job = requestQueue.shift();
-				job(pooled);
+
+				pooled.con.removeAllListeners('socketError');
+				pooled.con.on('socketError', (err) => {
+					console.log('queueProc()');
+					handleError(err);
+					pooled.status = FAIL;
+					job.pooled = null;
+					requestQueue.push(job);
+					pooled.con.removeAllListeners('socketError');
+					queueTimer = 2000;
+				});
+
+				job.pooled = pooled;
+				execJob(job);
 			}
 		}
 		
 		if(running) {
-			if(requestQueue.length > 0) setImmediate(queueProc);
-			else setTimeout(queueProc, 500);
+			//if(requestQueue.length > 0) setImmediate(queueProc);
+			//else setTimeout(queueProc, 500);
+			setTimeout(queueProc, queueTimer);
+			if(requestQueue.length > 0) queueTimer = Math.max(10, queueTimer - 10);
+			else queueTimer = Math.min(100, queueTimer + 10);
 		}
 	}
 	
+
+	function createCallbackQuery(queryDef) {
+		return function(obj, optcallback) {
+			obj = obj || {};
+			const job = {
+				queryDef: queryDef,
+				params: obj,
+				callback: optcallback || queryDef.callback,
+				pooled: null
+			};
+			job.resultHandler = getCallbackHandler(job);
+			requestQueue.push(job);
+		}
+	}
+	
+	function getCallbackHandler(job) {
+		if(!queryDef.callback) queryDef.callback = ()=>{};
+		return (err, rowCount, rows) => {
+			job.pooled.status = IDLE;
+			return job.callback(err, rowCount, rows);
+		}
+	}
+	
+	
+	function createPromiseQuery(queryDef) {
+		return function(obj) {
+			obj = obj || {};
+			return new Promise((resolve, reject) => {
+				const job = {
+					queryDef: queryDef,
+					params: obj,
+					resolve: resolve,
+					reject: reject,
+					pooled: null
+				};
+				job.resultHandler = getPromiseHandler(job);
+				requestQueue.push(job);
+			});
+		}
+	}
+	
+	function getPromiseHandler(job) {
+		return (err, rowCount, rows) => {
+			if(err) {
+				handleError(err);
+				// if timeout occurred, need to requeue
+				if(err.code == "ETIMEOUT" || err.code == "ESOCKET") {
+					job.pooled.status = FAIL;
+					job.pooled = null;
+					return requestQueue.push(job);
+				} else return job.reject();
+			}
+			
+			job.pooled.status = IDLE;
+			
+			if(rowCount == 0) return job.resolve([]);
+			
+			if(!job.queryDef.flatten) return job.resolve(rows);
+			
+			return job.resolve(flattenResults(rows));
+		}
+	}
+	
+	
+	function execJob(job) {
+		job.pooled.status = BUSY;
+		const req = new Request(job.queryDef.sql, job.resultHandler);
+		setParameters(req, job.queryDef.params, job.params);
+		job.pooled.con.execSql(req);
+	}
+
 	
 	this.start = function() {
 		running = true;
@@ -131,6 +249,11 @@ function SQLServerPool(config) {
 		running = false;
 	};
 	
+	this.exit = function() {
+		for(var i = 0; i < pool.length; i++) {
+			pool[i].con.close();
+		}
+	};
 	
 	// convenience method - passes query directly to Tedious
 	this.exec = async function(sql, callback) {
@@ -150,8 +273,18 @@ function SQLServerPool(config) {
 	this.loadQueries = function(queryList) {
 		var queryHash = {};
 		
+		// default basedir is the one above node_modules
+		if(!baseDir) baseDir = path.join(__dirname, '..', '..');
+		
 		for(var i = 0; i < queryList.length; i++) {
-			queryHash[queryList[i].id] = self.loadQuery(queryList[i].sql, queryList[i].params || null, queryList[i].callback || null, queryList[i].usePromise ? true : false);
+			// if sql starts with colon, load the query from a file
+			if(queryList[i].sql.substr(0,1) == ':')
+				queryList[i].sql = fs.readFileSync(path.join(baseDir, queryList[i].sql.substr(1)), 'utf8');
+			
+			if(!queryList[i].params) queryList[i].params = [];
+			
+			if(queryList[i].usePromise) queryHash[queryList[i].id] = createPromiseQuery(queryList[i]);
+			else queryHash[queryList[i].id] = createCallbackQuery(queryList[i]);
 		}
 		
 		return queryHash;
@@ -162,6 +295,7 @@ function SQLServerPool(config) {
 	// returns a function for calling the query
 	// if usePromise is true, will return a promise-style function
 	// rather than a callback-style one
+	/** @deprecated **/
 	this.loadQuery = function(sql, params, callback, usePromise) {
 		if(!callback) callback = function() {};
 		if(!params) params = [];
@@ -221,43 +355,8 @@ function SQLServerPool(config) {
 	return this;
 }
 
-function logError(e) {
-	console.log(`SQL Error: ${e}`);
-}
-
-
 
 module.exports = {
 	SQLServerPool
 };
 
-
-
-
-// Object.assign polyfill
-function objectAssign(target, source) {
-	var from;
-	var to = Object(target);
-	var symbols;
-
-	for (var s = 1; s < arguments.length; s++) {
-		from = Object(arguments[s]);
-
-		for (var key in from) {
-			if (hasOwnProperty.call(from, key)) {
-				to[key] = from[key];
-			}
-		}
-
-		if (Object.getOwnPropertySymbols) {
-			symbols = Object.getOwnPropertySymbols(from);
-			for (var i = 0; i < symbols.length; i++) {
-				if (propIsEnumerable.call(from, symbols[i])) {
-					to[symbols[i]] = from[symbols[i]];
-				}
-			}
-		}
-	}
-
-	return to;
-}
