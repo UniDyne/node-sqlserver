@@ -51,7 +51,7 @@ function SQLServerPool(config) {
 	// load connection / tedious config
 	// will decode username, password, server ip from base64 obfuscation
 	// note, none of these settings are encrypted
-	const sqlConfig = Object.assign({
+	const sqlcfg = Object.assign({
 		server: '127.0.0.1',
 		authentication: {
 			options: {
