@@ -1,6 +1,8 @@
 'use strict';
 
-const {Connection, Request, TYPES} = require('tedious');
+const fs = require('fs'),
+	path = require('path'),
+	{Connection, Request, TYPES} = require('tedious');
 
 
 // used to match type strings in parameter definitions
