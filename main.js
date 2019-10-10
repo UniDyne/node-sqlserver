@@ -270,7 +270,7 @@ function SQLServerPool(config) {
 	
 	// load an array of query definitions
 	// returns an object with function calls for each named query
-	this.loadQueries = function(queryList) {
+	this.loadQueries = function(queryList, baseDir) {
 		var queryHash = {};
 		
 		// default basedir is the one above node_modules
