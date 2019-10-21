@@ -25,9 +25,11 @@ const
 
 
 
-function handleError(err) {
-	if(global.output) global.output.error(JSON.stringify(err));
-	else console.log(JSON.stringify(err));
+function handleError(err, job) {
+	if(global.output) {
+		global.output.error(JSON.stringify(err));
+		if(job) global.output.error(JSON.stringify(job));
+	} else console.log(JSON.stringify(err));
 }
 
 
@@ -214,7 +216,7 @@ function SQLServerPool(config) {
 	function getPromiseHandler(job) {
 		return (err, rowCount, rows) => {
 			if(err) {
-				handleError(err);
+				handleError(err, job);
 				// if timeout occurred, need to requeue
 				if(err.code == "ETIMEOUT" || err.code == "ESOCKET") {
 					job.pooled.status = FAIL;
