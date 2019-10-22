@@ -28,7 +28,7 @@ const
 function handleError(err, job) {
 	if(global.output) {
 		global.output.error(JSON.stringify(err));
-		if(job) global.output.error(JSON.stringify(job));
+		if(job) global.output.error(JSON.stringify(job.queryDef));
 	} else console.log(JSON.stringify(err));
 }
 
