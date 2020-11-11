@@ -188,7 +188,7 @@ function SQLServerPool(config) {
 	}
 	
 	function getCallbackHandler(job) {
-		if(!queryDef.callback) queryDef.callback = ()=>{};
+		if(!job.callback) job.callback = ()=>{};
 		return (err, rowCount, rows) => {
 			job.pooled.status = IDLE;
 			return job.callback(err, rowCount, rows);
