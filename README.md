@@ -30,7 +30,8 @@ const sqlQueries = sqlServer.loadQueries([
 		params: [
 			{ "name": "id", "type": "int", "options": {} }
 		],
-		sql: "SELECT id, name FROM items WHERE cat_id = @id"
+		sql: "SELECT id, name FROM items WHERE cat_id = @id",
+		flatten: true // return field values without metadata
 	},{
 		id: "getAllCategories",
 		asPromise: false,
@@ -46,15 +47,13 @@ sqlQueries.getAllCategories({}, async (err, rowCount, rows) => {
 	for(var i = 0; i < rows.length; i++) {
 		
 		// query using promise
+		// getAllCategories is NOT flattened, so must use <field>.value
 		var items = await sqlQueries.getItems( rows[i].id.value );
 		
+		// getItems IS flattened, so access value through field name
 		for(var j = 0; j < items.length; j++)
-			console.log("Item: " + items[j].name.value);
+			console.log("Item: " + items[j].name);
 	}
 });
 ```
 
-## To Do
-
-* Add single-record call type
-* Option to flatten result (no metadata) ?
