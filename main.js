@@ -240,6 +240,7 @@ function SQLServerPool(config) {
 		job.pooled.status = BUSY;
 		const req = new Request(job.queryDef.sql, job.resultHandler);
 		setParameters(req, job.queryDef.params, job.params);
+		if(job.queryDef.timeout) req.setTimeout(job.queryDef.timeout);
 		job.pooled.con.execSql(req);
 	}
 
