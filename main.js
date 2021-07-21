@@ -125,7 +125,7 @@ function SQLServerPool(config) {
 				
 				// if connection ends, remove from pool
 				con.on('end', () => {
-					for(var i = 0; i < pool.length; i++) {
+					for(var i = pool.length - 1; i >= 0; i--) {
 						if(pool[i] === entry)
 							return pool.splice(i,1);
 					}
